@@ -1,0 +1,7 @@
+; $Id$
+name = CiviCRM/Sendgrid Integration
+description = Integrate CiviCRM Mailing with sendgrid event API
+package = Uprising
+dependencies[] = civicrm
+core = 6.x
+version = 6.x-1.0-dev

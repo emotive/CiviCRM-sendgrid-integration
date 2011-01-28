@@ -1,0 +1,307 @@
+<?php
+function sendgrid_menu() {
+
+	$items['sendgrid_sync'] = array(
+		'title' => 'Sendgrid Sync',
+		'page callback' => 'sendgrid_main',
+		// 'page arguments' => array('sendgrid_form'),
+		'access arguments' => array('access content'),
+		'type' => MENU_NORMAL_ITEM,
+	);
+
+	$items['admin/sendgrid_setup'] = array(
+		'title' => 'Sendgrid Integration Setup',
+		'page callback' => 'sendgrid_setup_main',
+		// 'page arguments' => array('sendgrid_form'),
+		'access arguments' => array('administer site configurations'),
+		'type' => MENU_CALLBACK,
+	);
+
+  return $items;
+}
+
+/*
+ * Implmentation of hook_init
+ */
+function sendgrid_init() {
+	global $user;
+	if($user->uid == 1) {
+		if(!sendgrid_setup_check()) {
+			$link = l('click here', 'admin/sendgrid_setup');
+			drupal_set_message('<p><strong>Warning:</strong> Sendgrid integration is not installed, please ' . $link . ' to set it up</p>', 'warning');
+		}
+	}
+}
+
+// menu callback function
+function sendgrid_main() {
+	if($_SERVER['REQUEST_METHOD'] == 'GET') {
+		return 'Access is not allowed';
+	}	
+	
+	$args = $_POST;
+	
+	if($args['key'] != 'emotive_sendgrid') {
+		return 'Access is denied (invalid API key)';
+	}
+	
+	if(array_key_exists('event',$args)) {
+		switch($args['event']) {
+			case 'bounce':
+				// i don't care about type
+				sendgrid_bounce(
+					$args['mid'],
+					addslashes($args['email']), 
+					$args['status'], 
+					addslashes($args['reason'])
+				);
+				return 'bounce reported';
+				// file_put_contents('/var/www/sites/default/files/temp.txt', print_r($args, TRUE));
+			break;
+			
+			case 'spamreport':
+				// for spam, we just want to flag them
+				sendgrid_spam(addslashes($args['email']));
+				return 'spam reported';
+			break;
+		}
+	}
+	
+}
+
+/*
+ ****************************************************
+ * Record a spam in the database
+ * 
+ * @params
+ * string $email			The email address that filed a spam complaint
+ *
+ * @return
+ *
+ */	
+function sendgrid_spam($email = null) {
+	
+	civicrm_initialize();
+	require_once('CRM/Core/DAO.php');
+	require_once('api/v2/Contact.php');
+	$query = sprintf("SELECT e.contact_id 
+						FROM civicrm_email e
+						JOIN civicrm_contact c ON e.contact_id = c.id
+						WHERE e.email = '%s' AND c.do_not_email = %d",
+						$email,0
+					);
+
+	// search to see if a contact with the email exist and it is not currently on do not email
+	$contact_id = CRM_Core_DAO::singleValueQuery($query);
+	if(isset($contact_id) && $contact_id != '') {
+		// mark the contact DO NOT EMAIL
+		$params = array(
+			'contact_type' => 'Individual',
+			'contact_id' => $contact_id,
+			'do_not_email' => 1,
+		);
+
+		$result = civicrm_contact_update($params);
+		if ( civicrm_error ( $result )) {
+			// record an error somewhere, watch dog it!
+			$message = sprintf("Failed to update the following spam complaint email: %s", $email);
+			watchdog('sendgrid', $message, array(), WATCHDOG_WARNING);
+		}
+	}
+}
+
+
+// record a bounce in CiviCRM
+function sendgrid_bounce($mailing_id, $email, $status = 9999, $reason ='unknown') {
+	civicrm_initialize();
+	require_once('api/v2/Group.php');
+	require_once('api/v2/GroupContact.php');
+	
+	// 1. get the contact id with the bounce email
+	$query = sprintf("SELECT contact_id FROM civicrm_email WHERE email = '%s'", $email);
+	$contact_id = CRM_Core_DAO::singleValueQuery($query);
+		
+	if(isset($contact_id) && $contact_id != '') {
+		// 2. Insert the bounce record
+		$bounce_type_id = sendgrid_check_bounce_reason($reason);
+		if(!$bounce_type_id) {
+			$bounce_type_id = sendgrid_check_bounce_reason($reason);
+		}
+		sendgrid_add_bounce_record($mailing_id, $email, $bounce_type_id, $reason);
+		
+		// 3. add the record into a group
+		$fail_group = groups_check();
+		$param = array(
+			'group_id' => $fail_group['email_fails_hard'],
+			'contact_id.1' => $contact_id,
+		);
+		
+		// adding to group
+		// @civicrm API (v2)
+		$result = civicrm_group_contact_add( $param );
+		
+		// some feedback here would be good
+	}
+}
+
+// check if this bounce type exists. If not, create it and return the bounce type id
+function sendgrid_check_bounce_reason($reason) {
+		
+	$bounce_type_id = CRM_Core_DAO::singleValueQuery("SELECT id FROM civicrm_mailing_bounce_type WHERE name = 'sendgrid'");
+	if(!isset($bounce_type_id) || $bounce_type_id == '') {
+		$insert_query = "INSERT INTO `civicrm_mailing_bounce_type` (`name`,`description`,`hold_threshold`)
+		VALUES (%1,%2,%3)";
+			
+		$params = array(
+			1 => array('sendgrid', 'String'),
+			2 => array('Sendgrid related bounce type', 'String'),
+			3 => array(1, 'Integer'),
+		);
+		CRM_Core_DAO::executeQuery($insert_query, $params);	
+	} else {
+		return $bounce_type_id;
+	}
+}
+
+/*
+ ****************************************************
+ * Add a bounce record into the CiviCRM database
+ * 
+ * @params
+ * int $mailing_id			CiviCRM mailing id
+ * string $email			The email address that has failed
+ * int $bounce_type_id		The bounce type id, should correspond to the list
+ *							of the socketlabs code
+ * string $bounce_reason	The reason for the bounce
+ *
+ * @return
+ *
+ */	
+function sendgrid_add_bounce_record($mailing_id = null, $email = null, $bounce_type_id = 9999, $bounce_reason = 'unknown') {
+	// if we don't have what we want, just skip this record
+	if($mailing_id == null || $email == null || !is_numeric($mailing_id)) {
+		return;
+	}
+
+	$event_queue_id_query = sprintf("SELECT civicrm_mailing_event_queue.id 
+		FROM civicrm_mailing_event_queue 
+			JOIN civicrm_mailing_job ON 
+			civicrm_mailing_event_queue.job_id = civicrm_mailing_job.id
+			JOIN civicrm_email ON
+			civicrm_email.id = civicrm_mailing_event_queue.email_id
+		WHERE civicrm_mailing_job.mailing_id = %d AND civicrm_email.email = '%s'
+		LIMIT 0, 1", $mailing_id, $email);	
+		
+	$event_queue_id = CRM_Core_DAO::singleValueQuery($event_queue_id_query);
+	
+	if(isset($event_queue_id)) {
+		$check = CRM_Core_DAO::singleValueQuery(sprintf("SELECT id FROM civicrm_mailing_event_bounce WHERE event_queue_id = %d", $event_queue_id));
+	}
+
+	// only insert the bounce record if it doesn't exist
+	if($check == NULL || !$check || $check === '') {
+		// Assume the SQL alter has been added, we can use those bounce type id directly
+		$query = "INSERT INTO civicrm_mailing_event_bounce (event_queue_id, bounce_type_id, bounce_reason, time_stamp) 
+		VALUES (%1,%2,%3,%4)";
+
+		$params = array(
+			1 => array($event_queue_id, 'Integer'),
+			2 => array($bounce_type_id, 'Integer'),
+			3 => array($bounce_reason, 'String'),
+			4 => array(date('Y-m-d H:i:s'), 'String'),
+		);
+
+		CRM_Core_DAO::executeQuery($query, $params);		
+	}
+}
+	
+/*
+ ****************************************************
+ * Check to see if the fail groups exists, if not 
+ * create them
+ *
+ * @params
+ * null
+ *
+ * @return
+ * array $data			key:	email_fails_hard	|	value: id of the group
+ *						key:	email_fails_soft	|	value: id of the group
+ *
+ */
+function groups_check() {
+	$data = array();
+
+	$names = array(
+		'email_fails_hard',
+		'email_fails_soft',
+	);
+
+	foreach($names as $name) {
+		$params = array(
+			'name' => $name,
+		);
+
+		$result = civicrm_group_get($params);
+		if($result['is_error'] == 1) {
+			$group_id = _create_group($name);
+			$data[$name] = $group_id;
+		} else {
+			foreach($result as $group) {
+				$data[$name] = $group['id'];
+			}
+		}
+	}
+	return $data;
+}
+
+function _create_group($group_title) {
+
+		civicrm_initialize();
+		require_once('api/v2/Group.php');
+
+		$strip = array('!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '+', '=', ';', ',', '/', '?', '<', '>', ' ');
+		$group_name = strtolower(str_replace($strip, '_', $group_title));
+
+		$params = array(
+			'name'        => $group_name,
+			'title'       => $group_title,
+			'description' => '',
+			'is_active'   => 1,
+			'visibility'  => 'User and User Admin Only',
+			'group_type'  => array( '1' => 1, '2' => 1 ),
+		);
+
+		$result = &civicrm_group_add( $params );
+		if ( civicrm_error ( $result )) {
+			return false;
+		} else {
+			return $result['result'];
+		}
+}
+
+// page to install the sendgrid sql stuff
+function sendgrid_setup_main() {
+	if(!sendgrid_setup_check()) {
+		sendgrid_setup();
+		return 'Sendgrid is setup';
+	} else {
+		return 'Sendgrid is already set up';
+	}
+}
+
+// set up all the necessary stuff to go
+function sendgrid_setup() {
+		db_query("ALTER TABLE civicrm_mailing_bounce_type MODIFY `name`
+			enum('AOL','Away','DNS','Host','Inactive','Invalid','Loop','Quota','Relay','Spam','Syntax','Unknown', 'Spam complaint', 'Blacklist', 'ISP block', 'Content block', 'URL block', 'Excess traffic', 'Security violation/virus', 'Open relay', 'Namespace mining detection', 'Authentication', 'Other', 'Unknown user', 'Bad domain', 'Address error', 'Closed account', 'Recipient mailbox full', 'Recipient email account is inactive/disabled', 'Greylist', 'server too busy', 'data format error', 'Network error', 'Too Old', 'configuration error', 'Other', 'Unknown', 'sendgrid')");
+
+		db_query("INSERT INTO civicrm_mailing_bounce_type (`name`, `description`, `hold_threshold`) VALUES ('sendgrid', 'sendgrid bounces', 1)");
+}
+
+function sendgrid_setup_check() {
+$query = db_query("SELECT id FROM civicrm_mailing_bounce_type WHERE name = 'sendgrid'");
+	$result = db_result($query);
+	if(!isset($result) || $result == '') {
+		return FALSE;
+	}
+	return TRUE;
+}
