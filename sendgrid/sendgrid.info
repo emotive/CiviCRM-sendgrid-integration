@@ -5,3 +5,4 @@ package = Uprising
 dependencies[] = civicrm
 core = 6.x
 version = 6.x-1.0-dev
+project = "uprising_sendgrid"
