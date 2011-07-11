@@ -30,8 +30,8 @@ function main() {
 			$service_url = sprintf("%s/sendgrid_sync", $site);
 			$result = http($service_url, '',POST, $post_data);
 			
-			file_put_contents('/var/www/sites/default/files/temp_data.txt', print_r($post_data, TRUE), FILE_APPEND);
-			file_put_contents('/var/www/sites/default/files/temp_result.txt', print_r($result, TRUE), FILE_APPEND);
+			// file_put_contents('/var/www/sites/default/files/temp_data.txt', print_r($post_data, TRUE), FILE_APPEND);
+			// file_put_contents('/var/www/sites/default/files/temp_result.txt', print_r($result, TRUE), FILE_APPEND);
 			
 			exit('normal exit...');
 			
