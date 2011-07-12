@@ -134,12 +134,12 @@ function sendgrid_bounce($mailing_id, $email, $status = 9999, $reason ='unknown'
 		$params = array(
 			'version' => '3',
 			'group_id' => $fail_group['email_fails_hard'],
-			'contact_id.' => $contact_id,
+			'contact_id' => $contact_id,
 		);
 		
 		// adding contact to group
 		// @civicrm API (v3)
-		$result = civicrm_api('group_contact', '', $params);
+		$result = civicrm_api('group_contact', 'create', $params);
 		
 		// provide feedback?
 	}
