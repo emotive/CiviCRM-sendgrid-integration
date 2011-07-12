@@ -1,4 +1,13 @@
 <?php
+/**********************************************
+ * This script serves as a dispatcher
+ * to individual deployment by adding
+ * key, category and mid to the post data
+ * and perform a HTTP POST to the site to
+ * synchronize the failure and spam complaints
+ **********************************************/
+
+
 main();
 
 function main() {
@@ -30,8 +39,8 @@ function main() {
 			$service_url = sprintf("%s/sendgrid_sync", $site);
 			$result = http($service_url, '',POST, $post_data);
 			
-			// file_put_contents('/var/www/sites/default/files/temp_data.txt', print_r($post_data, TRUE), FILE_APPEND);
-			// file_put_contents('/var/www/sites/default/files/temp_result.txt', print_r($result, TRUE), FILE_APPEND);
+			file_put_contents('/var/www/sites/default/files/temp_data.txt', print_r($post_data, TRUE), FILE_APPEND);
+			file_put_contents('/var/www/sites/default/files/temp_result.txt', print_r($result, TRUE), FILE_APPEND);
 			
 			exit('normal exit...');
 			
@@ -43,7 +52,6 @@ function main() {
 	}
 
 }
-
 
 // initate a curl request
 function http($target, $ref = '', $method = 'GET', $data_array = '', $incl_head = TRUE) {
