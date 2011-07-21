@@ -637,3 +637,17 @@ $query = db_query("SELECT id FROM civicrm_mailing_bounce_type WHERE name = 'Gene
 	}
 	return TRUE;
 }
+
+ function sendgrid_civicrm_mailingGroups(&$form, &$groups, &$mailings) {
+		#FIX 109
+		@db_query("UPDATE civicrm_email SET on_hold = 0 WHERE on_hold = 1");
+		
+		// CRM_Core_DAO::query($query);
+		@db_query("UPDATE   civicrm_email ce
+			INNER JOIN   civicrm_contact c ON ( c.id = ce.contact_id )
+			LEFT JOIN   civicrm_group_contact gc ON ( gc.contact_id = c.id and gc.status = 'Added' )
+			INNER JOIN   civicrm_group gr ON ( gr.id = gc.group_id )
+			SET   ce.on_hold = 1
+			WHERE   gr.name = 'email_fails_hard'");
+	}
+ }
