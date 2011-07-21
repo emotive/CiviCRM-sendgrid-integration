@@ -1,0 +1,57 @@
+<?php
+// $Id
+
+/**
+ * Implementation of hook_install().
+ */
+function sendgrid_install() {
+	// Create tables.
+	drupal_install_schema('sendgrid');
+}
+
+/**
+ * Implementation of hook_install().
+ */
+function sendgrid_uninstall() {
+  // Remove tables
+  drupal_uninstall_schema('sendgrid');
+  
+  // Kill module variables
+  variable_del('sendgrid_username');
+  variable_del('sendgrid_password');
+}
+
+/**
+ * Implementation of hook_schema().
+ */
+function sendgrid_schema() {
+
+	$schema['sendgrid'] = array(
+		'description' => t('Stores failed email run information'),
+		'fields' => array(		
+			'date' => array(
+				'type' => 'datetime',
+				'not null' => TRUE,
+				'description' => t('primary key'),
+			),
+			'run' => array(
+				'type' => 'int',
+				'size' => 'tiny',
+				'not null' => TRUE,
+				'default' => 0,
+				'description' => t('How many times has the failure cron ran'),
+			),
+			'processed' => array(
+				'type' => 'int',
+				'not null' => TRUE,
+				'size' => 'big',
+				'default' => 0,
+				'description' => t('How many failure email has been processed'),
+			),
+		),
+		'primary key' => array('date'),
+	);
+	
+	return $schema;
+}
+?>

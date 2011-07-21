@@ -8,7 +8,15 @@ function sendgrid_menu() {
 		'access arguments' => array('access content'),
 		'type' => MENU_NORMAL_ITEM,
 	);
-
+	
+	$items['admin/sg_config'] = array(
+		'title' => 'SG Configuration',
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('sendgrid_config_form'),
+		'access arguments' => array('administer site configurations'),
+		'type' => MENU_CALLBACK,
+	);
+	
 	$items['admin/sendgrid_setup'] = array(
 		'title' => 'Sendgrid Integration Setup',
 		'page callback' => 'sendgrid_setup_main',
@@ -16,9 +24,237 @@ function sendgrid_menu() {
 		'access arguments' => array('administer site configurations'),
 		'type' => MENU_CALLBACK,
 	);
+	
+	$items['sg_cron_run'] = array(
+		'title' => 'sg complaints run',
+		'page callback' => 'sendgrid_spam_cron_run',
+		// 'page arguments' => array('sendgrid_form'),
+		'access arguments' => array('access content'),
+		'type' => MENU_CALLBACK,
+	);
+	
+	$items['sg_bounce_cron_run'] = array(
+		'title' => 'sg bounce run',
+		'page callback' => 'sendgrid_bounce_run',
+		// 'page arguments' => array('sendgrid_form'),
+		'access arguments' => array('access content'),
+		'type' => MENU_CALLBACK,
+	);
 
+	
+	
   return $items;
 }
+
+/*
+ * Implmentation of hook cron
+ */
+function sendgrid_cron() {
+	sendgrid_spam_cron_run();
+}
+
+/*
+ * Configuration
+ */
+function sendgrid_config_form() {
+	
+	$form['sendgrid_username'] = array(
+		'#type' => 'textfield', 
+		'#required' => TRUE,
+		'#description' => 'sendgrid account username, in email format',
+		'#default_value' => variable_get('sendgrid_username', 'chang@emotivellc.com'),
+	);
+	
+	$form['sendgrid_password'] = array(
+		'#type' => 'password',
+		'#description' => 'sendgrid useraccount password',
+	);
+	
+	$password = variable_get('sendgrid_password', '');
+	if(isset($password) && $password != '') {
+		$form['password_msg'] = array(
+			'#type' => 'markup',
+			'#prefix' => '<div class="messages status">',
+			'#suffix' => '</div>',
+			'#value' => 'The password is stored, leave it blank unless you want to change it',
+		);
+	}
+	
+	$form['submit'] = array(
+		'#type' => 'submit',
+		'#value' => 'save configuration',
+	);
+	
+	return $form;
+}
+
+function sendgrid_config_form_submit($form, &$form_state) {
+	
+	variable_set('sendgrid_username', $form_state['values']['sendgrid_username']);
+	
+	if($form_state['values']['sendgrid_password'] != '') {
+		variable_set('sendgrid_password', $form_state['values']['sendgrid_password']);
+	}
+	
+	drupal_set_message('The configuration has been saved');
+	
+}
+
+/*
+ * If event api is not working then we use the web api to integrate
+ */
+function sendgrid_bounce_run($size = 500, $date_range = '2') {
+
+		$options = array(
+			'api_user' => variable_get('sendgrid_username', 'chang@emotivellc.com'),
+			'api_key' => variable_get('sendgrid_password', ''),
+			'start_date' => date('Y-m-d', strtotime("-$date_range day")),
+			'limit' => $size,
+		);
+		
+		return _sendgrid_bounce_run($options);
+}
+
+function _sendgrid_bounce_run($options = array()) {
+		
+		$recorded =0;
+		$skipped = 0;
+		
+		// use processed to determine if we still need to run the sync
+		$processed = db_result(db_query("SELECT processed FROM {sendgrid} WHERE date = '%s'", date('Y-m-d')));
+		if($processed == '') {
+			@db_query("INSERT INTO {sendgrid} (`date`) VALUES ('%s')", date('Y-m-d'));
+			$processed == 0;
+		} else {
+			// increment processed by one because we will use this to start the next index in the API call
+			$processed+=1;
+		}
+		$start = $processed;
+		
+		$options['offset'] = $start;
+		$query_string = http_build_query($options);
+		$request_uri = 'https://sendgrid.com/api/bounces.get.json?' . urldecode($query_string);
+		
+		// we are only going to do 500 from the start (where it left off last time)
+		$ch = curl_init($request_uri);
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		$res = curl_exec($ch);
+		curl_close($ch);	
+		
+		if($res) {
+			$_res = json_decode($res, TRUE);
+
+			if(empty($_res)) {
+				return 'No new failure record to fetch';
+			} else {
+				for($i = 0; $i<count($_res); $i++) {
+					if(_sendgrid_fail_group($_res[$i]['email'])) {
+						$recorded++;
+					} else {
+						$skipped++;
+					}
+					$processed++;
+				}
+			}
+		}
+
+		// Update the new (run) and new (processed)
+		$run = db_result(db_query("SELECT run FROM {sendgrid} WHERE date = '%s'", date('Y-m-d')));
+		@db_query("UPDATE {sendgrid} SET run = %d, processed = %d WHERE `date` LIKE '%s%%'", $run+1, $processed, date('Y-m-d'));
+		
+		return $recorded . ' processed. <br />' . $skipped . ' skipped';
+}
+
+// place bounced email in the failure group
+// old API v2
+function _sendgrid_fail_group($email) {
+	civicrm_initialize();
+	require_once('api/v2/Group.php');
+	require_once('api/v2/GroupContact.php');
+	
+	// 1. get the contact id with the bounce email
+	$query = sprintf("SELECT contact_id FROM civicrm_email WHERE email = '%s'", $email);
+	$contact_id = CRM_Core_DAO::singleValueQuery($query);
+		
+	if(isset($contact_id) && $contact_id != '') {
+		// 3. add the record into a group
+		$fail_group = groups_check();
+		$param = array(
+			'group_id' => $fail_group['email_fails_hard'],
+			'contact_id' => $contact_id,
+		);
+		
+		// adding to group
+		// @civicrm API (v2)
+		$result = civicrm_group_contact_add( $param );
+		if($result['is_error'] == 0) {
+			return TRUE;
+		} else {
+			return FALSE;
+		}
+	}
+}
+
+// API V3
+/*function _sendgrid_fail_group($email) {
+	civicrm_initialize();
+	require_once('api/api.php');
+	
+	// 1. get the contact id with the bounce email
+	$query = sprintf("SELECT contact_id FROM civicrm_email WHERE email = '%s'", $email);
+	$contact_id = CRM_Core_DAO::singleValueQuery($query);
+		
+	if(isset($contact_id) && $contact_id != '') {
+		// 3. add the record into a group
+		$fail_group = groups_check();
+		$param = array(
+			'version' => '3',
+			'group_id' => $fail_group['email_fails_hard'],
+			'contact_id' => $contact_id,
+		);
+		
+		// adding to group
+		// @civicrm API (v3)
+		$result = civicrm_api('group_contact', 'create', $param );
+		if($result['is_error'] == 0) {
+			return 1;
+		} else {
+			return 0;
+		}
+	}
+}*/
+
+
+/*
+ * Sendgrid cron run to sync spam
+ */
+function sendgrid_spam_cron_run() {
+		$count = 0;
+		$time = strtotime("-2 day");
+	
+		$request_url = sprintf("https://sendgrid.com/api/spamreports.get.json?api_user=%s&date=1&api_key=%s&start_date=%s&limit=500", 
+			variable_get('sendgrid_username', 'chang@emotivellc.com'),
+			variable_get('sendgrid_password', ''),
+			date('Y-m-d', $time)
+		);
+		
+		$curl = curl_init($request_url);
+		curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+		// curl_setopt($curl, CURLOPT_USERPWD, $this->socketlabs_account . ':' . $this->socketlabs_apikey);
+		$results = curl_exec($curl);
+		curl_close($curl);
+				
+		if($results) {
+			$results = json_decode($results);
+			for($i = 0; $i< count($results); $i++) {
+				if(sendgrid_spam($results[$i]->email)) {
+					$count++;
+				}
+			}
+		}
+		return $count . ' email retrieved';;
+}
+
 
 /*
  * Implmentation of hook_init
@@ -82,38 +318,43 @@ function sendgrid_spam($email = null) {
 	
 	civicrm_initialize();
 	require_once('CRM/Core/DAO.php');
-	require_once('api/api.php');
+	// require_once('api/api.php');
 	$query = sprintf("SELECT e.contact_id 
 						FROM civicrm_email e
 						JOIN civicrm_contact c ON e.contact_id = c.id
 						WHERE e.email = '%s' AND c.do_not_email = %d",
 						$email,0
 					);
-
+	
 	// search to see if a contact with the email exist and it is not currently on do not email
 	$contact_id = CRM_Core_DAO::singleValueQuery($query);
 	if(isset($contact_id) && $contact_id != '') {
+		$query = "UPDATE civicrm_contact SET do_not_email = 1 WHERE id = %1";
+        $params = array( 1 => array( $contact_id, 'Integer' ),);
+		CRM_Core_DAO::executeQuery( $query, $params );
+		return TRUE;
 		// mark the contact DO NOT EMAIL
-		$params = array(
+		/*$params = array(
 			'version' => '3',
 			'contact_type' => 'Individual',
 			'id' => $contact_id,
 			'do_not_email' => 1,
-		);
+		);*/
 		
 		// @CiviCRM API (V3)
-		$result = civicrm_api('contact', 'create', $params);
+		/*$result = civicrm_api('contact', 'create', $params);
 		if ( $result['is_error'] == 1 ) {
 			// record an error somewhere, watch dog it!
 			$message = sprintf("Failed to update the following spam complaint email: %s", $email);
 			watchdog('SG', $message, array(), WATCHDOG_WARNING);
-		}
+		}*/
 	}
+	return FALSE;
 }
 
 
 // record a bounce in CiviCRM
-function sendgrid_bounce($mailing_id, $email, $status = 9999, $reason ='unknown') {
+/*function sendgrid_bounce($mailing_id, $email, $status = 9999, $reason ='unknown') {
 	civicrm_initialize();
 	require_once('api/api.php');
 	
@@ -143,7 +384,41 @@ function sendgrid_bounce($mailing_id, $email, $status = 9999, $reason ='unknown'
 		
 		// provide feedback?
 	}
+}*/
+
+// old API v2
+function sendgrid_bounce($mailing_id, $email, $status = 9999, $reason ='unknown') {
+	civicrm_initialize();
+	require_once('api/v2/Group.php');
+	require_once('api/v2/GroupContact.php');
+	
+	// 1. get the contact id with the bounce email
+	$query = sprintf("SELECT contact_id FROM civicrm_email WHERE email = '%s'", $email);
+	$contact_id = CRM_Core_DAO::singleValueQuery($query);
+		
+	if(isset($contact_id) && $contact_id != '') {
+		// 2. Insert the bounce record
+		$bounce_type_id = sendgrid_check_bounce_reason();
+		if(!$bounce_type_id) {
+			$bounce_type_id = sendgrid_check_bounce_reason();
+		}
+		sendgrid_add_bounce_record($mailing_id, $email, $bounce_type_id, $reason);
+		
+		// 3. add the record into a group
+		$fail_group = groups_check();
+		$param = array(
+			'group_id' => $fail_group['email_fails_hard'],
+			'contact_id.1' => $contact_id,
+		);
+		
+		// adding to group
+		// @civicrm API (v2)
+		$result = civicrm_group_contact_add( $param );
+		
+		// some feedback here would be good
+	}
 }
+
 
 // check if this bounce type exists. If not, create it and return the bounce type id
 function sendgrid_check_bounce_reason() {
@@ -229,7 +504,7 @@ function sendgrid_add_bounce_record($mailing_id = null, $email = null, $bounce_t
  *						key:	email_fails_soft	|	value: id of the group
  *
  */
-function groups_check() {
+/*function groups_check() {
 	$data = array();
 
 	$names = array(
@@ -280,7 +555,61 @@ function _create_group($group_title) {
 		} else {
 			return $result['id'];
 		}
+}*/
+
+// legecy api v2 stuff
+function groups_check() {
+	$data = array();
+
+	$names = array(
+		'email_fails_hard',
+		'email_fails_soft',
+	);
+
+	foreach($names as $name) {
+		$params = array(
+			'name' => $name,
+		);
+
+		$result = civicrm_group_get($params);
+		if($result['is_error'] == 1) {
+			$group_id = _create_group($name);
+			$data[$name] = $group_id;
+		} else {
+			foreach($result as $group) {
+				$data[$name] = $group['id'];
+			}
+		}
+	}
+	return $data;
 }
+
+function _create_group($group_title) {
+
+		civicrm_initialize();
+		require_once('api/v2/Group.php');
+
+		$strip = array('!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '+', '=', ';', ',', '/', '?', '<', '>', ' ');
+		$group_name = strtolower(str_replace($strip, '_', $group_title));
+
+		$params = array(
+			'name'        => $group_name,
+			'title'       => $group_title,
+			'description' => '',
+			'is_active'   => 1,
+			'visibility'  => 'User and User Admin Only',
+			'group_type'  => array( '1' => 1, '2' => 1 ),
+		);
+
+		$result = &civicrm_group_add( $params );
+		if ( civicrm_error ( $result )) {
+			return false;
+		} else {
+			return $result['result'];
+		}
+} // end of legecy api v2 function
+
+
 
 // page to install the sendgrid sql stuff
 function sendgrid_setup_main() {
@@ -295,7 +624,7 @@ function sendgrid_setup_main() {
 // set up all the necessary stuff to go
 function sendgrid_setup() {
 		db_query("ALTER TABLE civicrm_mailing_bounce_type MODIFY `name`
-			enum('AOL','Away','DNS','Host','Inactive','Invalid','Loop','Quota','Relay','Spam','Syntax','Unknown', 'Spam complaint', 'Blacklist', 'ISP block', 'Content block', 'URL block', 'Excess traffic', 'Security violation/virus', 'Open relay', 'Namespace mining detection', 'Authentication', 'Other', 'Unknown user', 'Bad domain', 'Address error', 'Closed account', 'Recipient mailbox full', 'Recipient email account is inactive/disabled', 'Greylist', 'server too busy', 'data format error', 'Network error', 'Too Old', 'configuration error', 'Other', 'Unknown', 'sendgrid')");
+			enum('AOL','Away','DNS','Host','Inactive','Invalid','Loop','Quota','Relay','Spam','Syntax','Unknown', 'Spam complaint', 'Blacklist', 'ISP block', 'Content block', 'URL block', 'Excess traffic', 'Security violation/virus', 'Open relay', 'Namespace mining detection', 'Authentication', 'Other', 'Unknown user', 'Bad domain', 'Address error', 'Closed account', 'Recipient mailbox full', 'Recipient email account is inactive/disabled', 'Greylist', 'server too busy', 'data format error', 'Network error', 'Too Old', 'configuration error', 'Other', 'Unknown', 'General SG')");
 
 		db_query("INSERT INTO civicrm_mailing_bounce_type (`name`, `description`, `hold_threshold`) VALUES ('General SG', 'SG bounces', 1)");
 }
