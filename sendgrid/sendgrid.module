@@ -649,5 +649,4 @@ $query = db_query("SELECT id FROM civicrm_mailing_bounce_type WHERE name = 'Gene
 			INNER JOIN   civicrm_group gr ON ( gr.id = gc.group_id )
 			SET   ce.on_hold = 1
 			WHERE   gr.name = 'email_fails_hard'");
-	}
- }
+}
